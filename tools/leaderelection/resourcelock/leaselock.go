@@ -27,6 +27,7 @@ import (
 	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
 )
 
+// LeaseLock 依赖于 Leases 资源
 type LeaseLock struct {
 	// LeaseMeta should contain a Name and a Namespace of a
 	// LeaseMeta object that the LeaderElector will attempt to lead.

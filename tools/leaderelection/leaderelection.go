@@ -194,6 +194,9 @@ type LeaderElector struct {
 }
 
 // Run starts the leader election loop
+// le.acquire 函数尝试从 Etcd 中获取资源锁, 领导者节点获取到资源锁后会执行该领导者程序的主要逻辑(
+// 即 le.config.Callbacks.OnStartedLeading 回调函数), 并通过 le.renew 函数定时(默认值为 2 秒)对
+// 资源锁续约. 候选节点获取不到资源锁, 它不会退出并定时(默认值为 2 秒)尝试获取资源锁, 直到成功为止.
 func (le *LeaderElector) Run(ctx context.Context) {
 	defer func() {
 		runtime.HandleCrash()
@@ -234,6 +237,11 @@ func (le *LeaderElector) IsLeader() bool {
 
 // acquire loops calling tryAcquireOrRenew and returns true immediately when tryAcquireOrRenew succeeds.
 // Returns false if ctx signals done.
+// acquire 资源锁获取过程
+// 获取资源锁的过程通过 wait.JitterUntil 定时器定时执行, 它接收一个 func 匿名函数和一个 stopCh chan, 内部会定时
+// 调用匿名函数, 只有当 stopCh 关闭时, 该定时器才会停止并退出.
+// 执行 le.tryAcquireOrRenew 函数来获取资源锁. 如果其获取资源锁失败, 会通过 return 等待下一次定时获取资源锁. 如
+// 果其获取资源锁成功, 则说明当前节点可以成为领导者节点, 退出 acquire 函数并返回 true.
 func (le *LeaderElector) acquire(ctx context.Context) bool {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -256,16 +264,23 @@ func (le *LeaderElector) acquire(ctx context.Context) bool {
 }
 
 // renew loops calling tryAcquireOrRenew and returns immediately when tryAcquireOrRenew fails or ctx signals done.
+// 领导者节点获取资源锁后, 会定时(默认值为 2 秒) 循环更新租约信息, 以保持长久的领导者身份. 若因
+// 网络超时而导致租约信息更新失败, 则说明被候选节点抢占了领导者身份, 当前节点会退出进程.
 func (le *LeaderElector) renew(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wait.Until(func() {
 		timeoutCtx, timeoutCancel := context.WithTimeout(ctx, le.config.RenewDeadline)
 		defer timeoutCancel()
+		// 领导者节点的续约过程通过 wait.PollImmediateUntil 定时器定时执行, 它接收一个 func 匿名函数(条件函数) 和一个 stopCh,
+		// 内部会定时条件函数, 当条件函数返回 true 或 stopCh 关闭时, 该定时器才会停止并退出.
 		err := wait.PollImmediateUntil(le.config.RetryPeriod, func() (bool, error) {
 			done := make(chan bool, 1)
 			go func() {
 				defer close(done)
+				// 执行 le.tryAcquireOrRenew 函数来实现领导者节点的续约, 其原理与资源锁获取过程相同.
+				// le.tryAcquireOrRenew 函数返回 true 说明续约成功, 并进入下一个定时续约; 返回 false
+				// 则退出并执行 le.release 函数且释放资源锁.
 				done <- le.tryAcquireOrRenew()
 			}()
 
@@ -325,6 +340,8 @@ func (le *LeaderElector) tryAcquireOrRenew() bool {
 	}
 
 	// 1. obtain or create the ElectionRecord
+	// 1. 首先, 通过 le.config.Lock.Get 函数获取资源锁, 当资源锁不存在时, 当前节点创建该 key(获取锁)并写入
+	//    自身节点的信息,创建成功则当前节点成为领导者节点并返回 true.
 	oldLeaderElectionRecord, oldLeaderElectionRawRecord, err := le.config.Lock.Get()
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -341,11 +358,13 @@ func (le *LeaderElector) tryAcquireOrRenew() bool {
 	}
 
 	// 2. Record obtained, check the Identity & Time
+	// 2. 当资源锁存在时, 更新本地缓存的租约信息.
 	if !bytes.Equal(le.observedRawRecord, oldLeaderElectionRawRecord) {
 		le.observedRecord = *oldLeaderElectionRecord
 		le.observedRawRecord = oldLeaderElectionRawRecord
 		le.observedTime = le.clock.Now()
 	}
+	// 候选节点会验证领导者节点的租约是否到期, 如果尚未到期, 暂时还不能抢占并返回 false
 	if len(oldLeaderElectionRecord.HolderIdentity) > 0 &&
 		le.observedTime.Add(le.config.LeaseDuration).After(now.Time) &&
 		!le.IsLeader() {
@@ -355,6 +374,8 @@ func (le *LeaderElector) tryAcquireOrRenew() bool {
 
 	// 3. We're going to try to update. The leaderElectionRecord is set to it's default
 	// here. Let's correct it before updating.
+	// 3. 如果是领导者节点, 那么 AcquireTime(资源锁获得时间) 和 LeaderTransitions(领导者进行切换的次数) 字段保持不变.
+	//    如果是候选节点, 则说明领导者节点的租约到期, 给 LeaderTransitions 字段加 1 并抢占资源锁.
 	if le.IsLeader() {
 		leaderElectionRecord.AcquireTime = oldLeaderElectionRecord.AcquireTime
 		leaderElectionRecord.LeaderTransitions = oldLeaderElectionRecord.LeaderTransitions
@@ -363,6 +384,7 @@ func (le *LeaderElector) tryAcquireOrRenew() bool {
 	}
 
 	// update the lock itself
+	// 4. 通过 le.config.Lock.Update 函数尝试去更新租约信息, 若更新成功, 函数返回 true.
 	if err = le.config.Lock.Update(leaderElectionRecord); err != nil {
 		klog.Errorf("Failed to update lock: %v", err)
 		return false
@@ -373,6 +395,8 @@ func (le *LeaderElector) tryAcquireOrRenew() bool {
 	return true
 }
 
+// maybeReportTransition 若客户端保存的 leader 标识与上一次的不一致, 且配置了 OnNewLeader 回调函数,
+// 则调用该 le.config.Callbacks.OnNewLeader 回调函数
 func (le *LeaderElector) maybeReportTransition() {
 	if le.observedRecord.HolderIdentity == le.reportedLeader {
 		return

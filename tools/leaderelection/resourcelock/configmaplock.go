@@ -31,6 +31,7 @@ import (
 // and use ConfigMaps as the means to pass that configuration
 // data we will likely move to deprecate the Endpoints lock.
 
+// ConfigMapLock 依赖于 ConfigMap 资源
 type ConfigMapLock struct {
 	// ConfigMapMeta should contain a Name and a Namespace of a
 	// ConfigMapMeta object that the LeaderElector will attempt to lead.

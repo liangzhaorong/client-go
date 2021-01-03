@@ -26,6 +26,7 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
+// EndpointsLock 依赖于 Endpoints 资源, 默认资源锁为该类型
 type EndpointsLock struct {
 	// EndpointsMeta should contain a Name and a Namespace of an
 	// Endpoints object that the LeaderElector will attempt to lead.

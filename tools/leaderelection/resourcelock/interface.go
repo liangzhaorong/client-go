@@ -44,11 +44,11 @@ type LeaderElectionRecord struct {
 	// attempt to acquire leases with empty identities and will wait for the full lease
 	// interval to expire before attempting to reacquire. This value is set to empty when
 	// a client voluntarily steps down.
-	HolderIdentity       string      `json:"holderIdentity"`
-	LeaseDurationSeconds int         `json:"leaseDurationSeconds"`
-	AcquireTime          metav1.Time `json:"acquireTime"`
-	RenewTime            metav1.Time `json:"renewTime"`
-	LeaderTransitions    int         `json:"leaderTransitions"`
+	HolderIdentity       string      `json:"holderIdentity"`       // 领导者身份标识, 通常为 Hostname_<hash> 值
+	LeaseDurationSeconds int         `json:"leaseDurationSeconds"` // 领导者租约的时长
+	AcquireTime          metav1.Time `json:"acquireTime"`          // 领导者获得锁的时间
+	RenewTime            metav1.Time `json:"renewTime"`            // 领导者续租的时间
+	LeaderTransitions    int         `json:"leaderTransitions"`    // 领导者选举切换的次数
 }
 
 // EventRecorder records a change in the ResourceLock.
@@ -71,24 +71,31 @@ type ResourceLockConfig struct {
 // to hide the details on specific implementations in order to allow
 // them to change over time.  This interface is strictly for use
 // by the leaderelection code.
+// 每种资源锁实现了对 key(资源锁) 的操作方法, 接口定义如下
 type Interface interface {
 	// Get returns the LeaderElectionRecord
+	// Get 用于获取资源锁的所有信息
 	Get() (*LeaderElectionRecord, []byte, error)
 
 	// Create attempts to create a LeaderElectionRecord
+	// Create 用于创建一个资源锁
 	Create(ler LeaderElectionRecord) error
 
 	// Update will update and existing LeaderElectionRecord
+	// Update 用于更新资源锁信息
 	Update(ler LeaderElectionRecord) error
 
 	// RecordEvent is used to record events
+	// RecordEvent 通过 EventBroadcaster 事件管理器记录事件
 	RecordEvent(string)
 
 	// Identity will return the locks Identity
+	// Identity 用于获取领导者身份标识
 	Identity() string
 
 	// Describe is used to convert details on current resource lock
 	// into a string
+	// Describe 用于获取资源锁的信息
 	Describe() string
 }
 
