@@ -78,6 +78,11 @@ type ClientContentConfig struct {
 // any failure.
 //
 // Most consumers should use client.New() to get a Kubernetes API client.
+//
+// RESTClient 是最基础的客户端. 其他的 ClientSet、DynamicClient 及 DiscoveryClient 都是基于
+// RESTClient 实现的. RESTClient 对 HTTP request 进行了封装, 实现了 RESTFul 风格的 API. 它
+// 具有很高的灵活性, 数据不依赖于方法和资源, 因此 RESTClient 能处理多种类型的调用, 返回不同的
+// 数据格式.
 type RESTClient struct {
 	// base is the root URL for all invocations of the client
 	base *url.URL

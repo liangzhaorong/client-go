@@ -112,6 +112,11 @@ type Interface interface {
 
 // Clientset contains the clients for groups. Each group has exactly one
 // version included in a Clientset.
+// Clientset 在 RESTClient 的基础上封装了对 Resource 和 Version 的管理方法. 每一个 Resource 可理解为一个客户端,
+// 而 ClientSet 则是多个客户端的集合, 每一个 Resource 和 Version 都以函数的方式暴露给开发者. ClientSet 只能方法
+// Kubernetes 内置资源(即客户端集合内的资源), 不能直接访问 CRD 自定义资源. ClientSet 是通过 client-gen 代码生成
+// 器自动生成的. 如果需要 ClientSet 访问 CRD 自定义资源, 可通过 client-gen 代码生成器重新生成 ClientSet, 在 ClientSet
+// 集合中自动生成与 CRD 操作相关的接口.
 type Clientset struct {
 	*discovery.DiscoveryClient
 	admissionregistrationV1      *admissionregistrationv1.AdmissionregistrationV1Client

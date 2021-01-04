@@ -186,6 +186,7 @@ func (r *Request) Suffix(segments ...string) *Request {
 }
 
 // Resource sets the resource to access (<resource>/[ns/<namespace>/]<name>)
+// Resource 设置请求的资源名称
 func (r *Request) Resource(resource string) *Request {
 	if r.err != nil {
 		return r
@@ -263,6 +264,7 @@ func (r *Request) Name(resourceName string) *Request {
 }
 
 // Namespace applies the namespace scope to a request (<resource>/[ns/<namespace>/]<name>)
+// Namespace 设置请求的命名空间
 func (r *Request) Namespace(namespace string) *Request {
 	if r.err != nil {
 		return r
@@ -338,6 +340,7 @@ func (r *Request) Param(paramName, s string) *Request {
 // to the request. Use this to provide versioned query parameters from client libraries.
 // VersionedParams will not write query parameters that have omitempty set and are empty. If a
 // parameter has already been set it is appended to (Params and VersionedParams are additive).
+// VersionedParams 将一些查询选项(如 limit、TimeoutSeconds 等)添加到请求参数中
 func (r *Request) VersionedParams(obj runtime.Object, codec runtime.ParameterCodec) *Request {
 	return r.SpecificallyVersionedParams(obj, codec, r.c.content.GroupVersion)
 }
@@ -771,6 +774,7 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 	maxRetries := 10
 	retries := 0
 	for {
+		// 根据请求参数生成 RESTful URL
 		url := r.URL().String()
 		req, err := http.NewRequest(r.verb, url, r.body)
 		if err != nil {
@@ -849,6 +853,7 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 				r.backoff.Sleep(time.Duration(seconds) * time.Second)
 				return false
 			}
+			// fn 函数即 transformResponse 将结果转换为资源对象
 			fn(req, resp)
 			return true
 		}()
@@ -864,6 +869,7 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 // Error type:
 //  * If the server responds with a status: *errors.StatusError or *errors.UnexpectedObjectError
 //  * http.Client.Do errors are returned directly.
+// Do 通过该函数执行请求
 func (r *Request) Do() Result {
 	if err := r.tryThrottle(); err != nil {
 		return Result{err: err}
@@ -1166,6 +1172,7 @@ func (r Result) StatusCode(statusCode *int) Result {
 // Into stores the result into obj, if possible. If obj is nil it is ignored.
 // If the returned object is of type Status and has .Status != StatusSuccess, the
 // additional information in Status will be used to enrich the error.
+// Into 将 kube-apiserver 返回的 Result 对象解析到 obj 对象中
 func (r Result) Into(obj runtime.Object) error {
 	if r.err != nil {
 		// Check whether the result has a Status object in the body and prefer that.

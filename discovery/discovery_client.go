@@ -127,6 +127,7 @@ type OpenAPISchemaInterface interface {
 
 // DiscoveryClient implements the functions that discover server-supported API groups,
 // versions and resources.
+// DiscoveryClient 发现客户端, 用于发现 kube-apiserver 所支持的资源组、资源版本、资源信息(即 Group、Versions、Resources)
 type DiscoveryClient struct {
 	restClient restclient.Interface
 

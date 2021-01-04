@@ -279,6 +279,8 @@ type ContentConfig struct {
 // object. Note that a RESTClient may require fields that are optional when initializing a Client.
 // A RESTClient created by this method is generic - it expects to operate on an API that follows
 // the Kubernetes conventions, but may not be the Kubernetes API.
+// RESTClientFor 函数通过 kubeconfig 配置信息实例化 RESTClient 对象, RESTClient 对象构建 HTTP 请求参数,
+// 例如 Get 函数设置请求方法为 get 操作, 它还支持 Post、Put、Delete、Patch 等请求方法.
 func RESTClientFor(config *Config) (*RESTClient, error) {
 	if config.GroupVersion == nil {
 		return nil, fmt.Errorf("GroupVersion is required when initializing a RESTClient")

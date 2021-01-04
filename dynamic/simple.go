@@ -29,6 +29,12 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// dynamicClient 与 ClientSet 最大的不同之处是, ClientSet 仅能访问 Kubernetes 内置资源(即 Client 集合内的资源),
+// 不能直接访问 CRD 自定义资源. ClientSet 需要预先实现每种 Resource 和 Version 的操作, 其内部的数据都是结构化数据(
+// 即已知数据结构). 而 DynamicClient 能够处理 Kubernetes 中的所有资源对象, 包括 Kubernetes 内置资源与 CRD 自定义资源.
+// DynamicClient 内部实现了 Unstructured, 用于处理非结构化数据结构(即无法提前预知数据结构), 这也是 DynamicClient
+// 能处理 CRD 自定义资源的关键.
+// TODO: DynamicClient 不是类型安全的, 因此在访问 CRD 自定义资源时需要特别注意. 如, 在操作指针不当的情况下可能会导致程序崩溃.
 type dynamicClient struct {
 	client *rest.RESTClient
 }
