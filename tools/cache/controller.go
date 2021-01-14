@@ -31,16 +31,16 @@ type Config struct {
 	// The queue for your objects - has to be a DeltaFIFO due to
 	// assumptions in the implementation. Your Process() function
 	// should accept the output of this Queue's Pop() method.
-	Queue
+	Queue // DeltaFIFO 实例
 
 	// Something that can list and watch your objects.
-	ListerWatcher
+	ListerWatcher // 实现 ListerWatcher 接口的对象, 用于获取及监控 objectType 代表的资源类型的资源列表
 
 	// Something that can process your objects.
-	Process ProcessFunc
+	Process ProcessFunc // 处理从 DeltaFIFO 中取出来的 Deltas 对象, 默认实现为 HandleDeltas 函数
 
 	// The type of your objects.
-	ObjectType runtime.Object
+	ObjectType runtime.Object // 具体的资源类型, 如 v1.Pod
 
 	// Reprocess everything at least this often.
 	// Note that if it takes longer for you to clear the queue than this
@@ -49,18 +49,18 @@ type Config struct {
 	// problem, we can change that replacement policy to append new
 	// things to the end of the queue instead of replacing the entire
 	// queue.
-	FullResyncPeriod time.Duration
+	FullResyncPeriod time.Duration // 执行 resync 的周期, resync
 
 	// ShouldResync, if specified, is invoked when the controller's reflector determines the next
 	// periodic sync should occur. If this returns true, it means the reflector should proceed with
 	// the resync.
-	ShouldResync ShouldResyncFunc
+	ShouldResync ShouldResyncFunc // 检测是否有 listeners 需要执行 resync 操作
 
 	// If true, when Process() returns an error, re-enqueue the object.
 	// TODO: add interface to let you inject a delay/backoff or drop
 	//       the object completely if desired. Pass the object in
 	//       question to this interface as a parameter.
-	RetryOnError bool
+	RetryOnError bool // 执行 Process() 函数出错时是否重试
 }
 
 // ShouldResyncFunc is a type of function that indicates if a reflector should perform a
@@ -120,6 +120,7 @@ func (c *controller) Run(stopCh <-chan struct{}) {
 	var wg wait.Group
 	defer wg.Wait()
 
+	// 启动 Reflector, 该 r.Run 主要周期执行 ListAndWatch 函数, 以获取和监听指定的资源类型的资源列表
 	wg.StartWithChannel(stopCh, r.Run)
 
 	wait.Until(c.processLoop, time.Second, stopCh)
@@ -187,9 +188,9 @@ type ResourceEventHandler interface {
 // as few of the notification functions as you want while still implementing
 // ResourceEventHandler.
 type ResourceEventHandlerFuncs struct {
-	AddFunc    func(obj interface{})
-	UpdateFunc func(oldObj, newObj interface{})
-	DeleteFunc func(obj interface{})
+	AddFunc    func(obj interface{})            // 当监听的资源对象被创建时触发的事件回调方法
+	UpdateFunc func(oldObj, newObj interface{}) // 当监听的资源对象被更新时触发的事件回调方法
+	DeleteFunc func(obj interface{})            // 当监听的资源对象被删除时触发的事件回调方法
 }
 
 // OnAdd calls AddFunc if it's not nil.
@@ -257,6 +258,8 @@ func (r FilteringResourceEventHandler) OnDelete(obj interface{}) {
 // DeletionHandlingMetaNamespaceKeyFunc checks for
 // DeletedFinalStateUnknown objects before calling
 // MetaNamespaceKeyFunc.
+//
+// DeletionHandlingMetaNamespaceKeyFunc 用于计算资源对象的 key, 创建 Informer 时默认使用该函数
 func DeletionHandlingMetaNamespaceKeyFunc(obj interface{}) (string, error) {
 	if d, ok := obj.(DeletedFinalStateUnknown); ok {
 		return d.Key, nil

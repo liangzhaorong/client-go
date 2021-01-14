@@ -28,6 +28,7 @@ import (
 )
 
 // NewInformerFunc takes kubernetes.Interface and time.Duration to return a SharedIndexInformer.
+// NewInformerFunc 使用 kubernetes.Interface 和 time.Duration 来返回一个 SharedIndexInformer.
 type NewInformerFunc func(kubernetes.Interface, time.Duration) cache.SharedIndexInformer
 
 // SharedInformerFactory a small interface to allow for adding an informer without an import cycle

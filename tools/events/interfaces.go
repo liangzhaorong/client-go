@@ -22,6 +22,7 @@ import (
 )
 
 // EventRecorder knows how to record events on behalf of an EventSource.
+// EventRecorder 事件(Event)生产者, 也称为事件记录器. Kubernetes 系统组件通过 EventRecorder 记录关键性事件.
 type EventRecorder interface {
 	// Eventf constructs an event from the given information and puts it in the queue for sending.
 	// 'regarding' is the object this event is about. Event will make a reference-- or you may also
@@ -41,6 +42,8 @@ type EventRecorder interface {
 }
 
 // EventBroadcaster knows how to receive events and send them to any EventSink, watcher, or log.
+// EventBroadcaster 事件(Event)消费者, 也称为事件广播器. EventBroadcaster 消费 EventRecorder 记录的事件并将其分发给目前所有
+// 已连接的 broadcasterWatcher. 分发过程有两种机制, 分别是非阻塞(Non-Blocking)分发机制和阻塞(Blocking)分发机制.
 type EventBroadcaster interface {
 	// StartRecordingToSink starts sending events received from the specified eventBroadcaster.
 	StartRecordingToSink(stopCh <-chan struct{})

@@ -93,6 +93,13 @@ func NewDeltaFIFO(keyFunc KeyFunc, knownObjects KeyListerGetter) *DeltaFIFO {
 // items have been deleted when Replace() or Delete() are called. The deleted
 // object will be included in the DeleteFinalStateUnknown markers. These objects
 // could be stale.
+//
+// DeltaFIFO 可分开理解, FIFO 是一个先进先出的队列, 它拥有队列操作的基本方法, 如 Add、Update、Delete、
+// List、Pop、Close 等, 而 Delta 是一个资源对象存储, 它可以保存资源对象的操作类型, 如 Added(添加)操作
+// 类型、Updated(更新)操作类型、Deleted(删除)操作类型、Sync(同步)操作类型等.
+//
+// DeltaFIFO 与其他队列最大的不同之处是, 它会保留所有关于资源对象(obj)的操作类型, 队列中会存在拥有不同
+// 操作类型的同一个资源对象, 消费者在处理该资源对象时能够了解该资源对象所发生的事情.
 type DeltaFIFO struct {
 	// lock/cond protects access to 'items' and 'queue'.
 	lock sync.RWMutex
@@ -101,28 +108,34 @@ type DeltaFIFO struct {
 	// We depend on the property that items in the set are in
 	// the queue and vice versa, and that all Deltas in this
 	// map have at least one Delta.
+	// items 字段通过 map 数据结构的方式存储, value 存储的是对象的 Deltas 数组.
+	// 一个 Delta 包含操作类型以及资源对象
 	items map[string]Deltas
+	// queue 字段存储资源对象的 key, 该 key 通过 KeyOf 函数计算得到
 	queue []string
 
 	// populated is true if the first batch of items inserted by Replace() has been populated
 	// or Delete/Add/Update was called first.
+	// 首次调用 Delete/Add/Update 或者通过 Replace() 首次批量插入 items 到 DeltaFIFO 中时, 则设置该字段为 true
 	populated bool
 	// initialPopulationCount is the number of items inserted by the first call of Replace()
 	initialPopulationCount int
 
 	// keyFunc is used to make the key used for queued item
 	// insertion and retrieval, and should be deterministic.
+	// keyFunc 用于计算资源对象的 key, key 的格式为: {namespace}/{name}, 若不存在 namespace, 则为 {name}
 	keyFunc KeyFunc
 
 	// knownObjects list keys that are "known", for the
 	// purpose of figuring out which items have been deleted
 	// when Replace() or Delete() is called.
+	// knownObjects 实际为 Indexer 实例, 该实例是用于存储资源对象并自带索引功能的本地存储
 	knownObjects KeyListerGetter
 
 	// Indication the queue is closed.
 	// Used to indicate a queue is closed so a control loop can exit when a queue is empty.
 	// Currently, not used to gate any of CRED operations.
-	closed     bool
+	closed     bool // 标识队列是否已关闭
 	closedLock sync.Mutex
 }
 
@@ -170,6 +183,8 @@ func (f *DeltaFIFO) HasSynced() bool {
 
 // Add inserts an item, and puts it in the queue. The item is only enqueued
 // if it doesn't already exist in the set.
+// Add 当 ListAndWatch 函数中 Watch 到资源对象时, 会调用该函数, 将新增的资源对象添加到
+// DeltaFIFO 中.
 func (f *DeltaFIFO) Add(obj interface{}) error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
@@ -207,8 +222,9 @@ func (f *DeltaFIFO) Delete(obj interface{}) error {
 		// exist in knownObjects and it doesn't have corresponding item in items.
 		// Note that even if there is a "deletion" action in items, we can ignore it,
 		// because it will be deduped automatically in "queueActionLocked"
-		_, exists, err := f.knownObjects.GetByKey(id)
+		_, exists, err := f.knownObjects.GetByKey(id) // 尝试从本地缓存 Indexer 中获取该 key 指定的资源对象
 		_, itemsExist := f.items[id]
+		// 若该资源对象在本地存储 Indexer 和 DeltaFIFO 中都不存在, 则直接返回
 		if err == nil && !exists && !itemsExist {
 			// Presumably, this was deleted when a relist happened.
 			// Don't provide a second report of the same deletion.
@@ -297,16 +313,23 @@ func isDeletionDup(a, b *Delta) *Delta {
 
 // queueActionLocked appends to the delta list for the object.
 // Caller must lock first.
+// queueActionLocked 将 actionType 和 obj 构造出的一个 Delta 对象缓存到 f.items 和 f.queue 中,
+// 并唤醒休眠等待数据的 goroutine.
+// TODO: 执行该函数需要加锁
 func (f *DeltaFIFO) queueActionLocked(actionType DeltaType, obj interface{}) error {
+	// 1. 通过 f.KeyOf 函数计算出资源对象的 key
 	id, err := f.KeyOf(obj)
 	if err != nil {
 		return KeyError{obj, err}
 	}
 
+	// 将 actionType 和资源对象构造成 Delta, 添加到 items 中, 并通过 dedupDeltas 函数进行去重操作
 	newDeltas := append(f.items[id], Delta{actionType, obj})
 	newDeltas = dedupDeltas(newDeltas)
 
+	// 更新构造后的 Delta 并通过 cond.Broadcast 通知所有消费者解除阻塞
 	if len(newDeltas) > 0 {
+		// 若 f.items 这个 map 中不曾缓存过该资源对象, 则将该资源对象的 key 添加到 f.queue 中(仅限首次才需添加)
 		if _, exists := f.items[id]; !exists {
 			f.queue = append(f.queue, id)
 		}
@@ -398,6 +421,8 @@ func (f *DeltaFIFO) Pop(process PopProcessFunc) (interface{}, error) {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 	for {
+		// 当队列中没有数据时, 通过 f.cond.Wait 阻塞等待数据, 只有收到 cond.Broadcase 时才说明有数据被添加,
+		// 解除当前阻塞状态.
 		for len(f.queue) == 0 {
 			// When the queue is empty, invocation of Pop() is blocked until new item is enqueued.
 			// When Close() is called, the f.closed is set and the condition is broadcasted.
@@ -408,19 +433,25 @@ func (f *DeltaFIFO) Pop(process PopProcessFunc) (interface{}, error) {
 
 			f.cond.Wait()
 		}
+		// 如果队列中不为空, 取出 f.queue 的头部数据
 		id := f.queue[0]
 		f.queue = f.queue[1:]
 		if f.initialPopulationCount > 0 {
 			f.initialPopulationCount--
 		}
+		// item 是一个 Delta 切片, 可能会存在不同操作类型的资源对象,
+		// 如 [{"Added", obj1}, {"Updated", obj1}]
 		item, ok := f.items[id]
 		if !ok {
 			// Item may have been deleted subsequently.
 			continue
 		}
 		delete(f.items, id)
+		// 将该取出的 f.queue 头部数据对象传入 process 回调函数, 由上层消费者进行处理
+		// TODO: 这里 process 回调函数即为 sharedIndexInformer.HandleDeltas 方法
 		err := process(item)
 		if e, ok := err.(ErrRequeue); ok {
+			// 如果 process 回调函数处理出错, 则将该对象重新存入队列尾部.
 			f.addIfNotPresent(id, item)
 			err = e.Err
 		}
@@ -434,6 +465,8 @@ func (f *DeltaFIFO) Pop(process PopProcessFunc) (interface{}, error) {
 // 'f' takes ownership of the map, you should not reference the map again
 // after calling this function. f's queue is reset, too; upon return, it
 // will contain the items in the map, in no particular order.
+// Replace 将使用 list 对象中的数据以 Sync 操作类型保存到当前 DeltaFIFO 中,
+// 同时删除本地存储 Indexer 中缓存的所有旧的资源数据.
 func (f *DeltaFIFO) Replace(list []interface{}, resourceVersion string) error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
@@ -445,6 +478,7 @@ func (f *DeltaFIFO) Replace(list []interface{}, resourceVersion string) error {
 			return KeyError{item, err}
 		}
 		keys.Insert(key)
+		// 将 Sync 操作类型和 item 资源对象构成一个 Delta, 存储到 f.queue 和 f.items 中
 		if err := f.queueActionLocked(Sync, item); err != nil {
 			return fmt.Errorf("couldn't enqueue object: %v", err)
 		}
@@ -478,6 +512,8 @@ func (f *DeltaFIFO) Replace(list []interface{}, resourceVersion string) error {
 	}
 
 	// Detect deletions not already in the queue.
+	// 删除本地存储 Indexer 中所有旧的数据, 即非本次通过 list 参数传入的数据,
+	// 删除操作是通过将旧的数据结合 Deleted 操作类型构造成一个 Delta 对象, 存入 DeltaFIFO 中.
 	knownKeys := f.knownObjects.ListKeys()
 	queuedDeletions := 0
 	for _, k := range knownKeys {
@@ -485,6 +521,7 @@ func (f *DeltaFIFO) Replace(list []interface{}, resourceVersion string) error {
 			continue
 		}
 
+		// 从 Indexer 中获取指定 key 对应的资源对象
 		deletedObj, exists, err := f.knownObjects.GetByKey(k)
 		if err != nil {
 			deletedObj = nil
@@ -508,6 +545,8 @@ func (f *DeltaFIFO) Replace(list []interface{}, resourceVersion string) error {
 }
 
 // Resync will send a sync event for each item
+// Resync 机制会将 Indexer 本地存储中的资源对象同步到 DeltaFIFO 中, 并将这些资源对象设置为 Sync 的操作类型.
+// Resync 函数会在 Reflector 中定时执行, 它的执行周期由 NewReflector 函数传入的 resyncPeriod 参数设定.
 func (f *DeltaFIFO) Resync() error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
@@ -526,6 +565,8 @@ func (f *DeltaFIFO) Resync() error {
 }
 
 func (f *DeltaFIFO) syncKeyLocked(key string) error {
+	// f.knownObjects 是 Indexer 本地存储对象, 通过该对象可以获取 client-go 目前存储的所有资源对象,
+	// Indexer 对象在 NewDeltaFIFO 函数实例化 DeltaFIFO 对象时传入.
 	obj, exists, err := f.knownObjects.GetByKey(key)
 	if err != nil {
 		klog.Errorf("Unexpected error %v during lookup of key %v, unable to queue object for sync", err, key)
@@ -543,6 +584,7 @@ func (f *DeltaFIFO) syncKeyLocked(key string) error {
 	if err != nil {
 		return KeyError{obj, err}
 	}
+	// 若该资源对象在 DeltaFIFO 中已经存在, 则不需要再次往 DeltaFIFO 中存
 	if len(f.items[id]) > 0 {
 		return nil
 	}
@@ -590,8 +632,8 @@ const (
 // [*] Unless the change is a deletion, and then you'll get the final
 //     state of the object before it was deleted.
 type Delta struct {
-	Type   DeltaType
-	Object interface{}
+	Type   DeltaType   // 当前资源对象的操作类型, 如 Added、Updated、Deleted
+	Object interface{} // 资源对象
 }
 
 // Deltas is a list of one or more 'Delta's to an individual object.

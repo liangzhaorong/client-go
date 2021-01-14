@@ -46,6 +46,8 @@ import (
 const defaultExpectedTypeName = "<unspecified>"
 
 // Reflector watches a specified resource and causes all changes to be reflected in the given store.
+// Reflector 用于监控(Watch)指定的 Kubernetes 资源, 当监控的资源发生变化时, 触发相应的变更事件, 如 Added(
+// 资源添加)事件、Updated(资源更新)事件、Deleted(资源删除)事件, 并将其资源对象存放到本地缓存 DeltaFIFO 中.
 type Reflector struct {
 	// name identifies this reflector. By default it will be a file:line if possible.
 	name string
@@ -54,26 +56,26 @@ type Reflector struct {
 	// will be the stringification of expectedGVK if provided, and the
 	// stringification of expectedType otherwise. It is for display
 	// only, and should not be used for parsing or comparison.
-	expectedTypeName string
+	expectedTypeName string // 监听的资源对象, 如 v1.Pod
 	// The type of object we expect to place in the store.
 	expectedType reflect.Type
 	// The GVK of the object we expect to place in the store if unstructured.
 	expectedGVK *schema.GroupVersionKind
 	// The destination to sync up with the watch source
-	store Store
+	store Store // 实际为 DeltaFIFO 实例对象
 	// listerWatcher is used to perform lists and watches.
-	listerWatcher ListerWatcher
+	listerWatcher ListerWatcher // 实现 ListerWatcher 接口的对象, 用于获取及监控 expectedType 代表的资源类型的资源列表
 	// period controls timing between one watch ending and
 	// the beginning of the next one.
-	period       time.Duration
-	resyncPeriod time.Duration
+	period       time.Duration // 执行 ListAndWatch 函数的周期, 默认 1s
+	resyncPeriod time.Duration // 执行 resync 操作的周期
 	ShouldResync func() bool
 	// clock allows tests to manipulate time
 	clock clock.Clock
 	// lastSyncResourceVersion is the resource version token last
 	// observed when doing a sync with the underlying store
 	// it is thread safe, but not synchronized with the underlying store
-	lastSyncResourceVersion string
+	lastSyncResourceVersion string // 当前本地缓存的资源中最新的资源版本号 ResourceVersion
 	// lastSyncResourceVersionMutex guards read/write access to lastSyncResourceVersion
 	lastSyncResourceVersionMutex sync.RWMutex
 	// WatchListPageSize is the requested chunk size of initial and resync watch lists.
@@ -101,6 +103,15 @@ func NewNamespaceKeyedIndexerAndReflector(lw ListerWatcher, expectedType interfa
 // is nil. If resyncPeriod is non-zero, then lists will be executed after every
 // resyncPeriod, so that you can use reflectors to periodically process everything as
 // well as incrementally processing the things that change.
+//
+// Informer 可对 Kubernetes API Server 的内置/自定义 CRD 资源执行监控(Watch)操作, 其中最核心的功能是 Reflector.
+// Reflector 用于监控指定的 Kubernetes 资源, 当监控的资源发生变化时, 触发相应的变更事件, 如 Added、Updated、Deleted,
+// 并将其资源对象存放到本地缓存 DeltaFIFO 中.
+//
+// NewReflector 实例化 Reflector 对象, 实例化过程中须传入 ListerWatcher 数据接口对象, 它拥有 List 和 Watch 方法, 用于
+// 获取及监控资源列表. 只要实现了 List 和 Watch 方法的对象都可以称为 ListerWatcher. Reflector 对象通过 Run 函数启动监控
+// 并处理监控事件. 在 Reflector 源码实现中, 最主要的是 ListAndWatch 函数, 它负责获取资源列表(List)和监控(Watch)指定的
+// Kubernetes API Server 资源.
 func NewReflector(lw ListerWatcher, expectedType interface{}, store Store, resyncPeriod time.Duration) *Reflector {
 	return NewNamedReflector(naming.GetNameFromCallsite(internalPackages...), lw, expectedType, store, resyncPeriod)
 }
@@ -148,6 +159,7 @@ var internalPackages = []string{"client-go/tools/cache/"}
 // Run will exit when stopCh is closed.
 func (r *Reflector) Run(stopCh <-chan struct{}) {
 	klog.V(3).Infof("Starting reflector %v (%s) from %s", r.expectedTypeName, r.resyncPeriod, r.name)
+	// 每 r.period 周期执行一次 r.ListAndWatch 函数, 直到 stopCh 被 closed
 	wait.Until(func() {
 		if err := r.ListAndWatch(stopCh); err != nil {
 			utilruntime.HandleError(err)
@@ -181,6 +193,7 @@ func (r *Reflector) resyncChan() (<-chan time.Time, func() bool) {
 // ListAndWatch first lists all items and get the resource version at the moment of call,
 // and then use the resource version to watch.
 // It returns error if ListAndWatch didn't even try to initialize watch.
+// ListAndWatch List 在程序第一次运行时获取该资源下所有的对象数据并将其存储至 DeltaFIFO 中.
 func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 	klog.V(3).Infof("Listing and watching %v from %s", r.expectedTypeName, r.name)
 	var resourceVersion string
@@ -188,6 +201,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 	// Explicitly set "0" as resource version - it's fine for the List()
 	// to be served from cache and potentially be delayed relative to
 	// etcd contents. Reflector framework will catch up via Watch() eventually.
+	// ResourceVersion 为 0, 表示获取监听的资源所有的数据
 	options := metav1.ListOptions{ResourceVersion: "0"}
 
 	if err := func() error {
@@ -206,6 +220,11 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			// Attempt to gather list in chunks, if supported by listerWatcher, if not, the first
 			// list request will return the full response.
 			pager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (runtime.Object, error) {
+				// 1. r.listerWatch.List 用于获取资源下的所有对象的数据, 如, 获取所有 Pod 的资源数据. 获取资源数据是由 options
+				// 的 ResourceVersion(资源版本号)参数控制的, 如果 ResourceVersion 为 0, 则表示获取所有 Pod 的资源数据; 如果
+				// ResourceVersion 非 0, 则表示根据资源版本号继续获取, 功能有些类似于文件传输过程中的 "断点续传", 当传输过程
+				// 中遇到网络故障导致中断, 下次再连接时, 会根据资源版本号继续传输未完成的部分. 可以使本地缓存中的数据与 Etcd
+				// 集群中的数据保持一致.
 				return r.listerWatcher.List(opts)
 			}))
 			if r.WatchListPageSize != 0 {
@@ -213,14 +232,14 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			}
 			// Pager falls back to full list if paginated list calls fail due to an "Expired" error.
 			list, err = pager.List(context.Background(), options)
-			close(listCh)
+			close(listCh) // 获取到所有的数据, 关闭该 channel, 以便程序继续往下执行
 		}()
 		select {
 		case <-stopCh:
 			return nil
 		case r := <-panicCh:
 			panic(r)
-		case <-listCh:
+		case <-listCh: // 阻塞等待, 直到 list 到资源下所有对象的数据
 		}
 		if err != nil {
 			return fmt.Errorf("%s: Failed to list %v: %v", r.name, r.expectedTypeName, err)
@@ -230,17 +249,24 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 		if err != nil {
 			return fmt.Errorf("%s: Unable to understand list result %#v: %v", r.name, list, err)
 		}
+		// 2. 获取资源版本号, ResourceVersion(资源版本号)非常重要, Kubernetes 中所有的资源都拥有该字段, 它标识当前
+		// 资源对象的版本号. 每次修改当前资源对象时, Kubernetes API Server 都会更改 ResourceVersion, 使得 client-go
+		// 执行 Watch 操作时可以根据 ResourceVersion 来确定当前资源对象是否发生了变化.
 		resourceVersion = listMetaInterface.GetResourceVersion()
 		initTrace.Step("Resource version extracted")
+		// 3. meta.ExtractList 将资源数据转换成资源对象列表, 将 runtime.Object 对象转换成 []runtime.Object 对象.
+		// 因为 r.listerWatcher.List 获取的是资源下的所有对象的数据, 如所有的 Pod 资源数据, 所以它是一个资源列表.
 		items, err := meta.ExtractList(list)
 		if err != nil {
 			return fmt.Errorf("%s: Unable to understand list result %#v (%v)", r.name, list, err)
 		}
 		initTrace.Step("Objects extracted")
+		// 4. r.syncWith 用于将资源对象列表中的资源对象和资源版本号存储至 DeltaFIFO 中, 并会替换已存在的对象.
 		if err := r.syncWith(items, resourceVersion); err != nil {
 			return fmt.Errorf("%s: Unable to sync list result: %v", r.name, err)
 		}
 		initTrace.Step("SyncWith done")
+		// 5. r.setLastSyncResourceVersion 用于设置最新的资源版本号.
 		r.setLastSyncResourceVersion(resourceVersion)
 		initTrace.Step("Resource version updated")
 		return nil
@@ -248,24 +274,29 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 		return err
 	}
 
+	// 另起一个 goroutine 定期执行 resync 操作
 	resyncerrc := make(chan error, 1)
 	cancelCh := make(chan struct{})
 	defer close(cancelCh)
 	go func() {
+		// 根据 resync 周期时间创建一个定时器, 每 resync 时间就会从 resyncCh 这个 channel 中接收到信号
 		resyncCh, cleanup := r.resyncChan()
 		defer func() {
 			cleanup() // Call the last one written into cleanup
 		}()
 		for {
 			select {
-			case <-resyncCh:
+			case <-resyncCh: // 接收到信号, 表示需要执行 resync 操作
 			case <-stopCh:
 				return
 			case <-cancelCh:
 				return
 			}
+			// 若 r.ShouldResync 为 nil, 则强制执行 resync 操作; 或者 r.ShouldResync() 检测是否有 listener
+			// 到时间执行 resync 操作了.
 			if r.ShouldResync == nil || r.ShouldResync() {
 				klog.V(4).Infof("%s: forcing resync", r.name)
+				// 将 Indexer 中存储的资源对象以 Sync 操作类型存储到 DeltaFIFO 中
 				if err := r.store.Resync(); err != nil {
 					resyncerrc <- err
 					return
@@ -275,6 +306,11 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			resyncCh, cleanup = r.resyncChan()
 		}
 	}()
+
+	// Watch(监控)操作通过 HTTP 协议与 Kubernetes API Server 建立长连接, 接收 Kubernetes API Server 发来的资源变更
+	// 事件. Watch 操作的实现机制使用 HTTP 协议的分块传输编码(Chunked Transfer Encoding). 当 client-go 调用 Kubernetes
+	// API Server 时, Kubernetes API Server 在 Response 的 HTTP Header 中设置 Transfer-Encoding 的值为 chunked, 表示
+	// 采用分块传输编码, 客户端接收到该信息后, 便与服务端进行连接, 并等待下一个数据块(即资源的事件信息).
 
 	for {
 		// give the stopCh a chance to stop the loop, even in case of continue statements further down on errors
@@ -286,6 +322,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 
 		timeoutSeconds := int64(minWatchTimeout.Seconds() * (rand.Float64() + 1.0))
 		options = metav1.ListOptions{
+			// 从最新的资源版本号开始监听
 			ResourceVersion: resourceVersion,
 			// We want to avoid situations of hanging watchers. Stop any wachers that do not
 			// receive any events within the timeout window.
@@ -298,6 +335,8 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 
 		// start the clock before sending the request, since some proxies won't flush headers until after the first watch event is sent
 		start := r.clock.Now()
+		// r.listerWatcher.Watch 实际调用了指定资源 Informer(如 Pod Informer) 下的 WatchFunc 函数, 它通过 ClientSet
+		// 客户端与 Kubernetes API Server 建立长连接, 监控指定资源的变更事件.
 		w, err := r.listerWatcher.Watch(options)
 		if err != nil {
 			switch err {
@@ -319,6 +358,8 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			return nil
 		}
 
+		// r.watchHandler 用于处理资源的变更事件. 当触发 Added 事件、Updated 事件、Deleted 事件时, 将对应的资源对象
+		// 更新到本地缓存 DeltaFIFO 中并更新 ResourceVersion 资源版本号.
 		if err := r.watchHandler(start, w, &resourceVersion, resyncerrc, stopCh); err != nil {
 			if err != errorStopRequested {
 				switch {
@@ -334,6 +375,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 }
 
 // syncWith replaces the store's items with the given list.
+// syncWith 将资源对象列表中的资源对象和资源版本号存储至 DeltaFIFO 中, 并会替换已存在的对象.
 func (r *Reflector) syncWith(items []runtime.Object, resourceVersion string) error {
 	found := make([]interface{}, 0, len(items))
 	for _, item := range items {
@@ -364,6 +406,7 @@ loop:
 			if event.Type == watch.Error {
 				return apierrs.FromObject(event.Object)
 			}
+			// 检测是否为期待的类型, 若不是则略过不处理
 			if r.expectedType != nil {
 				if e, a := r.expectedType, reflect.TypeOf(event.Object); e != a {
 					utilruntime.HandleError(fmt.Errorf("%s: expected type %v, but watch event object had type %v", r.name, e, a))
@@ -376,27 +419,35 @@ loop:
 					continue
 				}
 			}
+			// 获取该对象的 meta 对象
 			meta, err := meta.Accessor(event.Object)
 			if err != nil {
 				utilruntime.HandleError(fmt.Errorf("%s: unable to understand watch event %#v", r.name, event))
 				continue
 			}
+			// 获取资源的版本号
 			newResourceVersion := meta.GetResourceVersion()
 			switch event.Type {
+			// 资源添加事件
 			case watch.Added:
+				// 将新增的资源对象增加到本地缓存 DeltaFIFO 中
 				err := r.store.Add(event.Object)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("%s: unable to add watch event object (%#v) to store: %v", r.name, event.Object, err))
 				}
+			// 资源更新事件
 			case watch.Modified:
+				// 更新本地缓存 DeltaFIFO 的资源对象
 				err := r.store.Update(event.Object)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("%s: unable to update watch event object (%#v) to store: %v", r.name, event.Object, err))
 				}
+			// 资源删除事件
 			case watch.Deleted:
 				// TODO: Will any consumers need access to the "last known
 				// state", which is passed in event.Object? If so, may need
 				// to change this.
+				// 删除本地缓存 DeltaFIFO 的资源对象
 				err := r.store.Delete(event.Object)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("%s: unable to delete watch event object (%#v) from store: %v", r.name, event.Object, err))
@@ -407,6 +458,7 @@ loop:
 				utilruntime.HandleError(fmt.Errorf("%s: unable to understand watch event %#v", r.name, event))
 			}
 			*resourceVersion = newResourceVersion
+			// 更新 ResourceVersion 资源版本号
 			r.setLastSyncResourceVersion(newResourceVersion)
 			eventCount++
 		}

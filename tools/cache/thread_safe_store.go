@@ -55,21 +55,35 @@ type ThreadSafeStore interface {
 }
 
 // threadSafeMap implements ThreadSafeStore
+//
+// threadSafeMap 是实现并发安全的存储. 作为存储, 它拥有存储相关的增、删、改、查操作方法, 如 Add、Update、
+// Delete、List、Get、Replace、Resync 等.
+//
+// threadSafeMap 是一个内存中的存储, 其中的数据并不会写入本地磁盘中, 每次的增、删、改、查操作都会加锁, 以
+// 保证数据的一致性. threadSafeMap 将资源对象数据存储于一个 map 数据结构 items 中.
+//
+// 在每次增、删、改 threadSafeMap 数据时, 都会通过 updateIndices 或 deleteFromIndices 函数变更 Indexer.
 type threadSafeMap struct {
-	lock  sync.RWMutex
+	lock sync.RWMutex
+	// 存储资源对象数据, key 通过 keyFunc 函数计算得到, 计算默认使用 MetaNamespaceKeyFunc 函数,
+	// 该函数根据资源对象计算出 <namespace>/<name> 格式的 key, 如果资源对象的 <namespace> 为空,
+	// 则 <name> 作为 key, 而 items 的 value 用于存储资源对象.
 	items map[string]interface{}
 
 	// indexers maps a name to an IndexFunc
+	// 存储索引器, key 为索引器名称, value 为索引器的实现函数
 	indexers Indexers
 	// indices maps a name to an Index
+	// 存储缓存器, key 为缓存器名称(实际为索引器名称), value 为缓存数据
 	indices Indices
 }
 
+// Add 添加资源对象
 func (c *threadSafeMap) Add(key string, obj interface{}) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	oldObject := c.items[key]
-	c.items[key] = obj
+	oldObject := c.items[key] // 获取旧的资源对象(如果有的话, 没有则为 nil)
+	c.items[key] = obj        // 将新的资源对象添加到 c.items 中
 	c.updateIndices(oldObject, obj, key)
 }
 
@@ -172,17 +186,23 @@ func (c *threadSafeMap) Index(indexName string, obj interface{}) ([]interface{},
 }
 
 // ByIndex returns a list of items that match an exact value on the index function
+// ByIndex 通过执行索引器函数得到索引结果.
+// 接收两个参数: indexName 索引器名称, indexKey 需要检索的 key.
 func (c *threadSafeMap) ByIndex(indexName, indexKey string) ([]interface{}, error) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
+	// 根据指定的索引器名称找出指定的索引器函数
 	indexFunc := c.indexers[indexName]
 	if indexFunc == nil {
 		return nil, fmt.Errorf("Index with name %s does not exist", indexName)
 	}
 
+	// 接着查找该索引器对应的缓存存储 Index
 	index := c.indices[indexName]
 
+	// 然后根据需要检索的 indexKey 从缓存数据中查到并返回数据
+	// TODO: set 中存储的项实际就是资源对象的 key(根据 keyFunc 函数计算得到)
 	set := index[indexKey]
 	list := make([]interface{}, 0, set.Len())
 	for key := range set {
@@ -229,6 +249,7 @@ func (c *threadSafeMap) AddIndexers(newIndexers Indexers) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	// 当 Indexer 已经运行起来后, 不允许添加索引器
 	if len(c.items) > 0 {
 		return fmt.Errorf("cannot add indexers to running index")
 	}
@@ -250,10 +271,13 @@ func (c *threadSafeMap) AddIndexers(newIndexers Indexers) error {
 // updateIndices must be called from a function that already has a lock on the cache
 func (c *threadSafeMap) updateIndices(oldObj interface{}, newObj interface{}, key string) {
 	// if we got an old object, we need to remove it before we add it again
+	// 若 oldObj 不为 nil, 即 c.items 中已存在该 key 对应的旧的资源对象, 则先将其从 Indices 中删除
 	if oldObj != nil {
 		c.deleteFromIndices(oldObj, key)
 	}
+	// 循环调用注册的所有索引器实现
 	for name, indexFunc := range c.indexers {
+		// 调用索引器函数, 返回该对象的索引值
 		indexValues, err := indexFunc(newObj)
 		if err != nil {
 			panic(fmt.Errorf("unable to calculate an index entry for key %q on index %q: %v", key, name, err))
@@ -264,6 +288,7 @@ func (c *threadSafeMap) updateIndices(oldObj interface{}, newObj interface{}, ke
 			c.indices[name] = index
 		}
 
+		// 以资源对象的每一个索引值作为 Index 的键(key), 以该资源对象计算得到的 key 作为 value 存储到 Index 中
 		for _, indexValue := range indexValues {
 			set := index[indexValue]
 			if set == nil {

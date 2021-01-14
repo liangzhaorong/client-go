@@ -23,6 +23,7 @@ import (
 )
 
 // Interface provides access to all the informers in this group version.
+// Interface 提供了可访问这个组版本下的所有资源的 informers
 type Interface interface {
 	// ComponentStatuses returns a ComponentStatusInformer.
 	ComponentStatuses() ComponentStatusInformer

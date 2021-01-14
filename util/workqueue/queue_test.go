@@ -26,6 +26,7 @@ import (
 
 func TestBasic(t *testing.T) {
 	// If something is seriously wrong this test will never complete.
+	// 创建一个 FIFO 队列
 	q := workqueue.New()
 
 	// Start producers

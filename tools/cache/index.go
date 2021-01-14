@@ -29,6 +29,11 @@ import (
 // Another kind is a name of an index.
 // The third kind of string is an "indexed value", which is produced by an
 // IndexFunc and can be a field value or any other string computed from the object.
+//
+// Indexer 是 client-go 用来存储资源对象并自带索引功能的本地存储, Reflector 从 DeltaFIFO 中将消费出来的
+// 资源对象存储至 Indexer. Indexer 与 Etcd 集群中的数据完全保持一致. client-go 可以很方便地从本地存储中
+// 读取相应的资源对象数据, 而无须每次从远程 Etcd 集群中读取, 以减轻 Kubernetes API Server 和 Etcd 集群的
+// 压力.
 type Indexer interface {
 	Store
 	// Index returns the stored objects whose set of indexed values
@@ -53,6 +58,7 @@ type Indexer interface {
 }
 
 // IndexFunc knows how to compute the set of indexed values for an object.
+// IndexFunc 索引器函数, 定义为接收一个资源对象, 返回检索结果列表
 type IndexFunc func(obj interface{}) ([]string, error)
 
 // IndexFuncToKeyFuncAdapter adapts an indexFunc to a keyFunc.  This is only useful if your index function returns
@@ -89,10 +95,16 @@ func MetaNamespaceIndexFunc(obj interface{}) ([]string, error) {
 }
 
 // Index maps the indexed value to a set of keys in the store that match on that value
+// Index 存储缓存数据, 其结构为 K/V
+// Index 中的缓存数据为 Set 集合数据结构, Set 本质与 Slice 相同, 但 Set 中不存在相同元素.
+// 由于 Go 语言标准库没有提供 Set 数据结构, Go 语言中的 map 结构类型是不能存在相同 key 的,
+// 所以 Kubernetes 将 map 结构类型的 key 作为 Set 数据结构, 实现 Set 去重特性.
 type Index map[string]sets.String
 
 // Indexers maps a name to a IndexFunc
+// Indexers 存储索引器, key 为索引器名称, value 为索引器的实现函数
 type Indexers map[string]IndexFunc
 
 // Indices maps a name to an Index
+// Indices 存储缓存器, key 为缓存器名称(实际为索引器名称), value 为缓存数据
 type Indices map[string]Index

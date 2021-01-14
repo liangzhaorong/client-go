@@ -33,6 +33,9 @@ import (
 
 // PodInformer provides access to a shared informer and lister for
 // Pods.
+// PodInformer 每一个 Kubernetes 资源上都实现了 Informer 机制. 每一个 Informer 上都会实现
+// Informer 和 Lister 方法.
+// TODO: 定义不同资源的 Informer, 允许监控不同资源的资源事件.
 type PodInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() v1.PodLister
@@ -54,6 +57,8 @@ func NewPodInformer(client kubernetes.Interface, namespace string, resyncPeriod 
 // NewFilteredPodInformer constructs a new informer for Pod type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// NewFilteredPodInformer 为 Pod 类型构建一个新的 informer 对象.
+// 优先通过 informer factory 来获得一个共享的 informer, 而不是又单独获取一个. 这可以减少内存占用和服务器的连接数.
 func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
@@ -76,14 +81,19 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 	)
 }
 
+// defaultInformer 实例化一个 SharedInformer 对象, 接收两个参数: 第 1 个参数 client 是用于与 Kubernetes API Server 交互
+// 的客户端, 第 2 个参数 resyncPeriod 用于设置多久进行一次 resync(重新同步), resync 会周期性地执行 List 操作, 将所有的资源
+// 存放在 Informer Store 中, 如果该参数为 0, 则禁用 resync 功能.
 func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
 	return NewFilteredPodInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
+// Informer 创建 Informer, 相当于注册到 Informer Factory 这个工厂中, 这样在启动时就会去 List & Watch 对应的资源.
 func (f *podInformer) Informer() cache.SharedIndexInformer {
 	return f.factory.InformerFor(&corev1.Pod{}, f.defaultInformer)
 }
 
+// Lister 创建 Lister
 func (f *podInformer) Lister() v1.PodLister {
 	return v1.NewPodLister(f.Informer().GetIndexer())
 }

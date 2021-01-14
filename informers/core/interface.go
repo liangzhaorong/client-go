@@ -24,13 +24,15 @@ import (
 )
 
 // Interface provides access to each of this group's versions.
+// Interface 可访问该组的每个版本
 type Interface interface {
 	// V1 provides access to shared informers for resources in V1.
+	// V1 提供了访问 V1 中的资源的 shared informers
 	V1() v1.Interface
 }
 
 type group struct {
-	factory          internalinterfaces.SharedInformerFactory
+	factory          internalinterfaces.SharedInformerFactory // SharedInformer 对象
 	namespace        string
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
 }

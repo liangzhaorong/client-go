@@ -73,6 +73,9 @@ type ExplicitKey string
 //
 // TODO: replace key-as-string with a key-as-struct so that this
 // packing/unpacking won't be necessary.
+//
+// MetaNamespaceKeyFunc 计算资源对象的 key, 该 key 用做将资源对象缓存到本地存储 Indexer 中时使用的 key
+// key 的格式为: {namespace}/{name}, 若不存在 namespace, 则为直接返回 {name}
 func MetaNamespaceKeyFunc(obj interface{}) (string, error) {
 	if key, ok := obj.(ExplicitKey); ok {
 		return string(key), nil
@@ -114,13 +117,15 @@ type cache struct {
 	cacheStorage ThreadSafeStore
 	// keyFunc is used to make the key for objects stored in and retrieved from items, and
 	// should be deterministic.
-	keyFunc KeyFunc
+	keyFunc KeyFunc // 用于计算资源对象的 key, 计算默认使用 cache.MetaNamespaceKeyFunc 函数
 }
 
 var _ Store = &cache{}
 
 // Add inserts an item into the cache.
+// Add 添加一个 obj 对象到本地存储 Indexer 中
 func (c *cache) Add(obj interface{}) error {
+	// 计算 obj 对象的 key
 	key, err := c.keyFunc(obj)
 	if err != nil {
 		return KeyError{obj, err}
@@ -228,6 +233,7 @@ func (c *cache) Resync() error {
 }
 
 // NewStore returns a Store implemented simply with a map and a lock.
+// NewStore 返回一个没有实现索引器的本地 Indexer 存储
 func NewStore(keyFunc KeyFunc) Store {
 	return &cache{
 		cacheStorage: NewThreadSafeStore(Indexers{}, Indices{}),
@@ -236,6 +242,9 @@ func NewStore(keyFunc KeyFunc) Store {
 }
 
 // NewIndexer returns an Indexer implemented simply with a map and a lock.
+// NewIndexer 实例化 Indexer 对象.
+// keyFunc 参数用于计算资源对象的 key, 计算默认使用 cache.MetaNamespaceKeyFunc 函数;
+// indexers 参数用于定义索引器, 其中 key 为索引器的名称, value 为索引器
 func NewIndexer(keyFunc KeyFunc, indexers Indexers) Indexer {
 	return &cache{
 		cacheStorage: NewThreadSafeStore(indexers, Indices{}),

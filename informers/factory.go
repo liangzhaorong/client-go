@@ -53,17 +53,36 @@ import (
 // SharedInformerOption defines the functional option type for SharedInformerFactory.
 type SharedInformerOption func(*sharedInformerFactory) *sharedInformerFactory
 
+// Informer 也被称为 Shared Informer, 它是可以被共享使用的. 在使用 client-go 编写代码时, 若同一资源的 Informer 被
+// 实例化了多次, 每个 Informer 使用一个 Reflector, 那么会运行过多相同的 ListAndWatch, 太多重复的序列化和反序列化
+// 操作会导致 Kubernetes API Server 负载过重.
+//
+// Shared Informer 可以使同一类资源 Informer 共享一个 Reflector, 这样可以节约很多资源. 通过 map 数据结构实现共享的
+// Informer 机制. Shared Informer 定义了一个 map 数据结构, 用于存放所有 Informer 的字段.
+//
+// 使用 Informers 时, 通常每个 GroupVersionResource(GVR)只实例化一个 Informers, 但是有时候在一个应用中往往有使用多种
+// 资源对象的需求, 这个时候为了方便共享 Informers, 可通过使用共享 Informer 工厂来实例化一个 Informer.
+//
+// 共享 Informer 工厂允许我们在应用中为同一个资源共享 Informer, 也就是说不同的控制器循环可使用相同的 watch 连接到后台的
+// APIServer, 如 kube-controller-manager 中的控制器数据量就非常多, 但是对每个资源(如 Pod), 在这个进程中就只有一个 Informer.
 type sharedInformerFactory struct {
-	client           kubernetes.Interface
-	namespace        string
+	client           kubernetes.Interface // 与 Kubernetes API Server 进行交互的客户端
+	namespace        string               // 若通过 NewSharedInformerFactory 函数构建的 Informer, 则这里为 "", 即表示所有的 namespace
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
 	lock             sync.Mutex
-	defaultResync    time.Duration
-	customResync     map[reflect.Type]time.Duration
+	// 该字段用于设置多久进行一次 resync(重新同步), resync 会周期性地执行 List 操作, 将所有的资源存放在
+	// Informer Store 中, 如果该参数为 0, 则禁用 resync 功能.
+	defaultResync time.Duration
+	// 存储资源类型与该资源自定义的 resync 周期
+	customResync map[reflect.Type]time.Duration
 
+	// informers 字段中存储了资源类型和对应于 SharedIndexInformer 的映射关系.
 	informers map[reflect.Type]cache.SharedIndexInformer
 	// startedInformers is used for tracking which informers have been started.
 	// This allows Start() to be called multiple times safely.
+	// startedInformers 用于记录指定资源类型的 informer 是否已经启动, 若已经启动,
+	// 则会向该 map 中插入该类型, value 置为 true.
+	// 这允许可以多次安全地调用 Start() 方法.
 	startedInformers map[reflect.Type]bool
 }
 
@@ -94,6 +113,10 @@ func WithNamespace(namespace string) SharedInformerOption {
 }
 
 // NewSharedInformerFactory constructs a new instance of sharedInformerFactory for all namespaces.
+// NewSharedInformerFactory 为所有命名空间实例化一个新的 sharedInformerFactory 对象
+// 接收两个参数: 第 1 个参数 client 是用于与 Kubernetes API Server 交互的客户端; 第 2 个参数 defaultResync 用于
+// 设置多久进行一次 resync(重新同步), resync 会周期性地执行 List 操作, 将所有的资源存放在 Informer Store 中, 如果该
+// 参数为 0, 则禁用 resync 功能.
 func NewSharedInformerFactory(client kubernetes.Interface, defaultResync time.Duration) SharedInformerFactory {
 	return NewSharedInformerFactoryWithOptions(client, defaultResync)
 }
@@ -107,6 +130,7 @@ func NewFilteredSharedInformerFactory(client kubernetes.Interface, defaultResync
 }
 
 // NewSharedInformerFactoryWithOptions constructs a new instance of a SharedInformerFactory with additional options.
+// NewSharedInformerFactoryWithOptions 实例化一个带有额外 options 的 SharedInformerFactory 对象
 func NewSharedInformerFactoryWithOptions(client kubernetes.Interface, defaultResync time.Duration, options ...SharedInformerOption) SharedInformerFactory {
 	factory := &sharedInformerFactory{
 		client:           client,
@@ -118,6 +142,7 @@ func NewSharedInformerFactoryWithOptions(client kubernetes.Interface, defaultRes
 	}
 
 	// Apply all options
+	// 应用所有的 options
 	for _, opt := range options {
 		factory = opt(factory)
 	}
@@ -126,11 +151,15 @@ func NewSharedInformerFactoryWithOptions(client kubernetes.Interface, defaultRes
 }
 
 // Start initializes all requested informers.
+// Start 共享 Informer 工厂的 Start 方法使 f.informers 中的每个资源类型对应的 informer 通过 goroutine 持久运行.
+// 该函数接收一个 stopCh 参数, 以便当程序退出时通过该 channel 通知在一个 goroutine 中运行的 informer 提前退出.
 func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
+	// 启动该共享 informer 工厂中注册的所有资源类型的 informer
 	for informerType, informer := range f.informers {
+		// 若该资源类型的 informer 未曾启动过, 则启动它
 		if !f.startedInformers[informerType] {
 			go informer.Run(stopCh)
 			f.startedInformers[informerType] = true
@@ -162,21 +191,28 @@ func (f *sharedInformerFactory) WaitForCacheSync(stopCh <-chan struct{}) map[ref
 
 // InternalInformerFor returns the SharedIndexInformer for obj using an internal
 // client.
+// InformerFor 添加了不同资源的 Informer, 在添加过程中如果已经存在同类型的资源 Informer, 则返回当前 Informer, 不再继续添加.
+// 接收两个参数: 第 1 个参数 obj 为具体的资源对象类型, 如 v1.Pod; 第 2 个参数 newFunc
 func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internalinterfaces.NewInformerFunc) cache.SharedIndexInformer {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
+	// 若 f.informers 中已经存在该资源类型, 则直接返回该 informer
 	informerType := reflect.TypeOf(obj)
 	informer, exists := f.informers[informerType]
 	if exists {
 		return informer
 	}
 
+	// 获取该资源类型对应的 resync 周期时间
 	resyncPeriod, exists := f.customResync[informerType]
 	if !exists {
+		// 若不存在, 则使用默认的
 		resyncPeriod = f.defaultResync
 	}
 
+	// 执行到这里, 表明 f.informers 中未存在该类型的 Informer, 则调用 newFunc 回调函数, 为该资源类型
+	// 创建一个新的 Informer, 并将该对象缓存到 f.informers 中.
 	informer = newFunc(f.client, resyncPeriod)
 	f.informers[informerType] = informer
 
@@ -185,6 +221,7 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 
 // SharedInformerFactory provides shared informers for resources in all known
 // API group versions.
+// SharedInformerFactory 为所有已知的组版本下的资源提供一个共享的 informer
 type SharedInformerFactory interface {
 	internalinterfaces.SharedInformerFactory
 	ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
